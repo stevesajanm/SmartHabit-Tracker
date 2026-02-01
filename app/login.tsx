@@ -1,23 +1,39 @@
+import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 export default function LoginScreen() {
+  const router = useRouter();
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLogin, setIsLogin] = useState(true);
 
   const handleSubmit = () => {
-    if (!email || !password) {
-      Alert.alert('Error', 'Please fill in all fields');
-      return;
-    }
-
     if (isLogin) {
+      if (!email || !password) {
+        Alert.alert('Error', 'Please fill in all fields');
+        return;
+      }
       Alert.alert('Success', `Logged in as ${email}`);
+      router.push({
+      pathname: "/home",
+      params: { name: "User" }
+    });
     } else {
-      Alert.alert('Success', `Account created for ${email}`);
+      if (!name || !email || !password) {
+        Alert.alert('Error', 'Please fill in all fields');
+        return;
+      }
+      const firstName = name.trim();
+      Alert.alert('Success', `Account created for ${name}`);
+      router.push({
+      pathname: "/home",
+      params: { name : firstName }  // Send only first name
+    });
     }
 
+    setName('');
     setEmail('');
     setPassword('');
   };
@@ -39,6 +55,22 @@ export default function LoginScreen() {
 
         {/* Form Section */}
         <View style={styles.formContainer}>
+          {/* Name Input (only show on signup) */}
+          {!isLogin && (
+            <View style={styles.inputContainer}>
+              <Text style={styles.label}>Name</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Your full name"
+                placeholderTextColor="#5a5a6e"
+                value={name}
+                onChangeText={setName}
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+            </View>
+          )}
+
           {/* Email Input */}
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Email</Text>
