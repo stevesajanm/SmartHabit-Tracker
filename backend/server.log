@@ -1,0 +1,17 @@
+[dotenv@17.3.1] injecting env (3) from .env -- tip: ≡ƒöÉ encrypt with Dotenvx: https://dotenvx.com
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ≡ƒ¢á∩╕Å  run anywhere with `dotenvx run -- yourcommand`
+Server running on http://0.0.0.0:5000
+Connected to MongoDB
+Login Attempt: { email: 'don@gmail.com', password: '***' }
+Profile Update Attempt for user: 69bef52356786acc6f2f2b05 { name: 'Donald', email: 'donald@gmail.com', password: '***' }
+Updating name from Don to Donald
+Checking email donald@gmail.com
+Updating email from don@gmail.com to donald@gmail.com
+Updating password (password provided)
+Saving user document...
+Profile update error details: TypeError: next is not a function
+    at model.<anonymous> (d:\react\SmartHabitTracker\backend\models\User.js:32:5)
+    at async Kareem.execPre (d:\react\SmartHabitTracker\backend\node_modules\kareem\index.js:70:24)
+    at async model.$__save (d:\react\SmartHabitTracker\backend\node_modules\mongoose\lib\model.js:394:5)
+    at async model.save (d:\react\SmartHabitTracker\backend\node_modules\mongoose\lib\model.js:664:5)
+    at async d:\react\SmartHabitTracker\backend\server.js:63:5

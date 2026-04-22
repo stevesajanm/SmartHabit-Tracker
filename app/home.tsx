@@ -1,439 +1,676 @@
-import { useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "@react-navigation/native";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
+import {
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import {
+  deleteHabitFromAPI,
+  fetchHabitsFromAPI,
+  saveSkipReasonToAPI,
+  toggleHabitInAPI,
+} from "../utils/apiService";
+import { Colors } from '../utils/theme';
+import {
+  calculateBestStreak,
+  calculateStreak,
+  getDateString,
+  migrateHabitsToNewFormat,
+} from "../utils/habitStorage";
+import { type Habit } from "../utils/types";
+import {
+  cancelHabitNotification,
+  requestNotificationPermission,
+  scheduleAllHabitNotifications,
+} from "../utils/notificationService";
+import BottomNav from "../components/BottomNav";
+
+// ─── Mood options for the failure/skip popup ──────────────────
+const SKIP_REASONS = [
+  { emoji: "😴", label: "Tired" },
+  { emoji: "🏃", label: "Too Busy" },
+  { emoji: "🤔", label: "Forgot" },
+  { emoji: "😔", label: "Low Motivation" },
+  { emoji: "🤒", label: "Sick" },
+  { emoji: "⚡", label: "Other" },
+];
+
+// ─── Mindfulness quotes — changes daily ───────────────────────
+const QUOTES = [
+  { text: "The present moment is the only moment available to us.", author: "Thich Nhat Hanh" },
+  { text: "Almost everything will work again if you unplug it for a few minutes.", author: "Anne Lamott" },
+  { text: "Caring for yourself is not self-indulgence. It is self-preservation.", author: "Audre Lorde" },
+  { text: "Rest is not idleness. It is the key to a better tomorrow.", author: "Unknown" },
+  { text: "Be where you are, not where you think you should be.", author: "Unknown" },
+  { text: "Small steps every day lead to big changes over time.", author: "Unknown" },
+  { text: "Peace comes from within. Do not seek it without.", author: "Buddha" },
+  { text: "Breathe. You are exactly where you need to be.", author: "Unknown" },
+  { text: "Progress, not perfection, is the goal.", author: "Unknown" },
+  { text: "Each morning we are born again. What we do today matters most.", author: "Buddha" },
+  { text: "You are allowed to be both a masterpiece and a work in progress.", author: "Sophia Bush" },
+  { text: "The quieter you become, the more you are able to hear.", author: "Rumi" },
+  { text: "Self-care is how you take your power back.", author: "Lalah Delia" },
+  { text: "Happiness is not something ready-made. It comes from your own actions.", author: "Dalai Lama" },
+  { text: "The mind is everything. What you think, you become.", author: "Buddha" },
+  { text: "Begin anywhere. Just begin.", author: "Unknown" },
+  { text: "Be gentle with yourself. You are a child of the universe.", author: "Max Ehrmann" },
+  { text: "One day at a time. One breath at a time.", author: "Unknown" },
+  { text: "What you practice grows stronger.", author: "Shauna Shapiro" },
+  { text: "Every moment is a fresh beginning.", author: "T.S. Eliot" },
+];
+
+const getDailyQuote = () => {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((now.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+  return QUOTES[dayOfYear % QUOTES.length];
+};
 
 export default function HomeScreen() {
-  const params = useLocalSearchParams();
-  const userName = params.name || 'User';
-  const [todayCompleted] = useState(2);
-  const [todayTotal] = useState(4);
-  const [bestStreak] = useState(15);
-  const [missedHabits] = useState(3);
+  const router = useRouter();
+  const params = useLocalSearchParams<{ name: string }>();
+  const [displayName, setDisplayName] = useState<string>("there");
+  const [habits, setHabits] = useState<Habit[]>([]);
 
-  // Mock habits data
-  const [habits] = useState([
-    {
-      id: 1,
-      name: 'Morning Meditation',
-      icon: '🧘',
-      difficulty: 'Easy',
-      streak: 12,
-      completed: true,
-    },
-    {
-      id: 2,
-      name: 'Read 30 Minutes',
-      icon: '📚',
-      difficulty: 'Medium',
-      streak: 8,
-      completed: true,
-    },
-    {
-      id: 3,
-      name: 'Workout',
-      icon: '💪',
-      difficulty: 'Hard',
-      streak: 5,
-      completed: false,
-    },
-    {
-      id: 4,
-      name: 'Drink 8 Glasses Water',
-      icon: '💧',
-      difficulty: 'Easy',
-      streak: 20,
-      completed: false,
-    },
-  ]);
+  // ─── Failure popup state ─────────────────────────────────────
+  const [showSkipPopup, setShowSkipPopup] = useState(false);
+  const [skipHabit, setSkipHabit] = useState<Habit | null>(null);
+  const [pendingMissedHabits, setPendingMissedHabits] = useState<Habit[]>([]);
 
-  // Get current date
-  const getCurrentDate = () => {
-    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-    const date = new Date();
-    return `${days[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()}`;
+  // ─── Calendar modal state ─────────────────────────────────────
+  const todayString = getDateString(new Date());
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [calMonth, setCalMonth] = useState(new Date().getMonth());
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+
+  useEffect(() => {
+    const loadName = async () => {
+      const savedName = await AsyncStorage.getItem('@user_name');
+      if (savedName) setDisplayName(savedName);
+    };
+    loadName();
+  }, []);
+
+  const loadHabits = async () => {
+    await migrateHabitsToNewFormat();
+    const loaded = await fetchHabitsFromAPI();
+    setHabits(loaded);
+
+    const notifEnabled = await AsyncStorage.getItem('@notifications_enabled');
+    if (notifEnabled !== 'false') {
+      const granted = await requestNotificationPermission();
+      if (granted) {
+        await scheduleAllHabitNotifications(loaded);
+      }
+    }
+
+    const hour = new Date().getHours();
+    const todayStr = getDateString(new Date());
+    if (hour >= 20) {
+      const missedWithNoReason = loaded.filter(h => {
+        const isNotDone = !h.dailyCompletions?.[todayStr];
+        const hasNoReason = !h.skipReasons?.[todayStr];
+        return isNotDone && hasNoReason;
+      });
+      if (missedWithNoReason.length > 0) {
+        const [first, ...rest] = missedWithNoReason;
+        setPendingMissedHabits(rest);
+        setSkipHabit(first);
+        setShowSkipPopup(true);
+      }
+    }
   };
 
-  const toggleHabit = (id) => {
-    // TODO: Update habit completion status
-    console.log('Toggle habit:', id);
+  useFocusEffect(
+    useCallback(() => {
+      loadHabits();
+    }, [])
+  );
+
+  const handleToggle = async (id: any) => {
+    const todayStr = getDateString(new Date());
+    const habit = habits.find(h => h.id === id);
+    if (!habit) return;
+
+    const wasCompleted = habit.dailyCompletions?.[todayStr] === true;
+
+    try {
+      await toggleHabitInAPI(id, new Date());
+      await loadHabits();
+
+      if (wasCompleted) {
+        const updatedHabits = await fetchHabitsFromAPI();
+        const updatedHabit = updatedHabits.find(h => h.id === id);
+        if (updatedHabit) {
+          setSkipHabit(updatedHabit);
+          setShowSkipPopup(true);
+        }
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to toggle habit.');
+    }
   };
+
+  const handleSkipReason = async (reason: string) => {
+    if (!skipHabit) return;
+    const todayStr = getDateString(new Date());
+    try {
+      await saveSkipReasonToAPI(skipHabit.id, todayStr, reason);
+      setShowSkipPopup(false);
+      setSkipHabit(null);
+
+      if (pendingMissedHabits.length > 0) {
+        const [next, ...rest] = pendingMissedHabits;
+        setPendingMissedHabits(rest);
+        setSkipHabit(next);
+        setShowSkipPopup(true);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save skip reason.');
+    }
+  };
+
+  const handleSkipDismiss = () => {
+    setShowSkipPopup(false);
+    setSkipHabit(null);
+    setPendingMissedHabits([]);
+  };
+
+  const handleLongPress = (habit: Habit) => {
+    Alert.alert(habit.name, "What would you like to do?", [
+      {
+        text: "Edit",
+        onPress: () =>
+          router.push({
+            pathname: "/add-habit",
+            params: { habitId: habit.id },
+          }),
+      },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => confirmDelete(habit),
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
+
+  const confirmDelete = (habit: Habit) => {
+    Alert.alert("Delete Habit", `Are you sure matching "${habit.name}"?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await deleteHabitFromAPI(habit.id);
+            await loadHabits();
+          } catch (error) {
+            Alert.alert('Error', 'Failed to delete habit.');
+          }
+        },
+      },
+    ]);
+  };
+
+  const isCompletedToday = (habit: Habit) => habit.dailyCompletions?.[todayString] === true;
+
+  const todayCompleted = habits.filter(isCompletedToday).length;
+  const todayTotal = habits.length;
+
+  const today = new Date();
+  const dateStr = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const missedCount = habits.filter((h) => !isCompletedToday(h)).length;
+
+  const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  const getCalendarDays = () => {
+    const firstDay = new Date(calYear, calMonth, 1).getDay();
+    const startPad = (firstDay === 0 ? 6 : firstDay - 1);
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+    const cells: (number | null)[] = [...Array(startPad).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+    while (cells.length % 7 !== 0) cells.push(null);
+    return cells;
+  };
+
+  const hasCompletionOnDate = (dateStr: string) => habits.some(h => h.dailyCompletions?.[dateStr] === true);
+  const countCompletedOnDate = (dateStr: string) => habits.filter(h => h.dailyCompletions?.[dateStr] === true).length;
+
+  const prevMonth = () => {
+    if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); }
+    else setCalMonth(m => m - 1);
+    setSelectedDay(null);
+  };
+  const nextMonth = () => {
+    if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); }
+    else setCalMonth(m => m + 1);
+    setSelectedDay(null);
+  };
+
+  const toDateStr = (day: number) => {
+    const m = String(calMonth + 1).padStart(2, '0');
+    const d = String(day).padStart(2, '0');
+    return `${calYear}-${m}-${d}`;
+  };
+
+  const isFutureDay = (day: number) => {
+    const date = new Date(calYear, calMonth, day);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return date > today;
+  };
+
+  const dailyQuote = getDailyQuote();
+
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good Morning";
+    if (hour < 18) return "Good Afternoon";
+    return "Good Evening";
+  };
+
+  const todayPercent = todayTotal > 0 ? Math.round((todayCompleted / todayTotal) * 100) : 0;
 
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.greeting}>Hello, {userName} 👋</Text>
-          <Text style={styles.date}>{getCurrentDate()}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.greeting}>{getGreeting()}, {displayName} 👋</Text>
+          <Text style={styles.date}>{dateStr}</Text>
         </View>
-        <TouchableOpacity style={styles.notificationButton}>
-          <Text style={styles.bellIcon}>🔔</Text>
-          <View style={styles.notificationBadge}>
-            <Text style={styles.badgeText}>3</Text>
-          </View>
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView showsVerticalScrollIndicator={false}>
-        {/* Stats Cards */}
-        <View style={styles.statsContainer}>
-          <View style={[styles.statCard, styles.todayCard]}>
-            <Text style={styles.statIcon}>✓</Text>
-            <Text style={styles.statLabel}>Today</Text>
-            <Text style={styles.statValue}>{todayCompleted}/{todayTotal}</Text>
-          </View>
-
-          <View style={[styles.statCard, styles.bestCard]}>
-            <Text style={styles.statIcon}>🔥</Text>
-            <Text style={styles.statLabel}>Best</Text>
-            <Text style={styles.statValue}>{bestStreak}</Text>
-          </View>
-
-          <View style={[styles.statCard, styles.missedCard]}>
-            <Text style={styles.statIcon}>📉</Text>
-            <Text style={styles.statLabel}>Missed</Text>
-            <Text style={styles.statValue}>{missedHabits}</Text>
-          </View>
-        </View>
-
-        {/* Alert Box */}
-        {missedHabits > 0 && (
-          <View style={styles.alertBox}>
-            <Text style={styles.alertIcon}>⚠️</Text>
-            <View style={styles.alertContent}>
-              <Text style={styles.alertTitle}>{missedHabits} habits need attention</Text>
-              <Text style={styles.alertSubtitle}>Don't worry! Let's reflect and get back on track.</Text>
-            </View>
-          </View>
-        )}
-
-        {/* Today's Habits Section */}
-        <View style={styles.habitsHeader}>
-          <Text style={styles.habitsTitle}>Today's Habits</Text>
-          <TouchableOpacity>
-            <Text style={styles.addNewButton}>Add New</Text>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.calendarBtn} onPress={() => setShowCalendar(true)}>
+            <Text style={styles.calendarBtnText}>📅</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addBtn} onPress={() => router.push("/add-habit")}>
+            <Text style={styles.addBtnText}>+</Text>
           </TouchableOpacity>
         </View>
+      </View>
 
-        {/* Habits List */}
-        <View style={styles.habitsList}>
-          {habits.map((habit) => (
-            <TouchableOpacity 
-              key={habit.id} 
-              style={styles.habitCard}
-              onPress={() => toggleHabit(habit.id)}
-            >
-              <View style={styles.habitIconContainer}>
-                <Text style={styles.habitIcon}>{habit.icon}</Text>
-              </View>
-              
+      <View style={styles.progressSection}>
+        <View style={styles.progressHeader}>
+          <Text style={styles.progressTitle}>Daily Goal</Text>
+          <Text style={styles.progressPercent}>{todayPercent}%</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={[styles.progressBarFill, { width: `${todayPercent}%` as any }]} />
+        </View>
+        <Text style={styles.progressSub}>
+          {todayCompleted === todayTotal && todayTotal > 0 ? "Crushed it! 🚀" : `${todayTotal - todayCompleted} remaining`}
+        </Text>
+      </View>
+
+      <View style={styles.statsRow}>
+        <View style={styles.statCard}>
+          <Text style={styles.statValue}>{todayCompleted}/{todayTotal}</Text>
+          <Text style={styles.statLabel}>Today</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statValue}>{calculateBestStreak(habits)}</Text>
+          <Text style={styles.statLabel}>Best</Text>
+        </View>
+      </View>
+
+      <ScrollView style={styles.habitsList} showsVerticalScrollIndicator={false}>
+        <View style={styles.quoteCard}>
+          <Text style={styles.quoteIcon}>🧘</Text>
+          <Text style={styles.quoteText}>"{dailyQuote.text}"</Text>
+          <Text style={styles.quoteAuthor}>— {dailyQuote.author}</Text>
+        </View>
+
+        <Text style={styles.sectionTitle}>Today's Habits</Text>
+        {habits.map((habit) => {
+          const completed = isCompletedToday(habit);
+          return (
+            <TouchableOpacity key={habit.id} style={styles.habitCard} onPress={() => handleToggle(habit.id)} onLongPress={() => handleLongPress(habit)}>
+              <Text style={styles.habitIcon}>{habit.icon}</Text>
               <View style={styles.habitInfo}>
                 <Text style={styles.habitName}>{habit.name}</Text>
                 <Text style={styles.habitDifficulty}>{habit.difficulty}</Text>
               </View>
-
               <View style={styles.habitRight}>
                 <View style={styles.streakBadge}>
-                  <Text style={styles.streakIcon}>🔥</Text>
-                  <Text style={styles.streakText}>{habit.streak}</Text>
+                  <Text style={styles.streakText}>🔥 {calculateStreak(habit)}</Text>
                 </View>
-                <View style={[styles.checkCircle, habit.completed && styles.checkCircleCompleted]}>
-                  {habit.completed && <Text style={styles.checkMark}>✓</Text>}
+                <View style={[styles.checkbox, completed && styles.checkboxCompleted]}>
+                  {completed && <Text style={styles.checkmark}>✓</Text>}
                 </View>
               </View>
             </TouchableOpacity>
-          ))}
-        </View>
+          );
+        })}
+        <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* Bottom Navigation */}
-      <View style={styles.bottomNav}>
-        <TouchableOpacity style={styles.navItem}>
-          <Text style={styles.navIconActive}>🏠</Text>
-          <Text style={styles.navLabelActive}>Home</Text>
-        </TouchableOpacity>
+      <BottomNav />
 
-        <TouchableOpacity style={styles.navItem}>
-          <Text style={styles.navIcon}>📊</Text>
-          <Text style={styles.navLabel}>Insights</Text>
-        </TouchableOpacity>
+      <Modal visible={showSkipPopup} transparent animationType="slide">
+        <View style={styles.popupOverlay}>
+          <View style={styles.popupBox}>
+            <Text style={styles.popupEmoji}>😔</Text>
+            <Text style={styles.popupTitle}>Why skipped?</Text>
+            <View style={styles.reasonsGrid}>
+              {SKIP_REASONS.map((r) => (
+                <TouchableOpacity key={r.label} style={styles.reasonBtn} onPress={() => handleSkipReason(r.label)}>
+                  <Text style={styles.reasonEmoji}>{r.emoji}</Text>
+                  <Text style={styles.reasonLabel}>{r.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TouchableOpacity style={styles.dismissBtn} onPress={handleSkipDismiss}>
+              <Text style={styles.dismissText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
-        <TouchableOpacity style={styles.navItem}>
-          <Text style={styles.navIcon}>🔔</Text>
-          <Text style={styles.navLabel}>Notifications</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.navItem}>
-          <Text style={styles.navIcon}>👤</Text>
-          <Text style={styles.navLabel}>Profile</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Floating Add Button */}
-      <TouchableOpacity style={styles.floatingButton}>
-        <Text style={styles.floatingButtonText}>+</Text>
-      </TouchableOpacity>
+      <Modal visible={showCalendar} transparent animationType="slide">
+        <View style={styles.calOverlay}>
+          <View style={styles.calBox}>
+            <View style={styles.calNavRow}>
+              <TouchableOpacity onPress={prevMonth} style={styles.calNavBtn}><Text style={styles.calNavArrow}>‹</Text></TouchableOpacity>
+              <View style={{alignItems:'center'}}><Text style={styles.calMonthText}>{MONTH_NAMES[calMonth]}</Text><Text style={styles.calYearText}>{calYear}</Text></View>
+              <TouchableOpacity onPress={nextMonth} style={styles.calNavBtn}><Text style={styles.calNavArrow}>›</Text></TouchableOpacity>
+            </View>
+            <View style={styles.calGrid}>
+              {getCalendarDays().map((day, i) => {
+                if (!day) return <View key={i} style={styles.calCell} />;
+                const dStr = toDateStr(day);
+                const isToday = dStr === todayString;
+                const isSelected = dStr === selectedDay;
+                const future = isFutureDay(day);
+                return (
+                  <TouchableOpacity key={dStr} style={styles.calCell} onPress={() => !future && setSelectedDay(isSelected ? null : dStr)}>
+                    <View style={[styles.calDayCircle, isToday && styles.calDayToday, isSelected && !isToday && styles.calDaySelected]}>
+                      <Text style={[styles.calDayNum, isToday && styles.calDayNumToday, future && styles.calDayNumFuture]}>{day}</Text>
+                    </View>
+                    {hasCompletionOnDate(dStr) && <View style={styles.calDot} />}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <TouchableOpacity style={styles.calCloseBtn} onPress={() => setShowCalendar(false)}><Text style={styles.calCloseBtnText}>CLOSE</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#1a1a2e',
-  },
+  container: { flex: 1, backgroundColor: Colors.background },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 60,
     paddingHorizontal: 20,
-    paddingTop: 50,
+    paddingBottom: 16,
+  },
+  calendarBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.surfaceSubtle,
+    borderRadius: 12,
+  },
+  calendarBtnText: { fontSize: 20 },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'center'
+  },
+  addBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.primary,
+    borderRadius: 12,
+  },
+  addBtnText: { color: Colors.background, fontSize: 24, fontWeight: 'bold', lineHeight: 28 },
+  progressSection: {
+    paddingHorizontal: 20,
     paddingBottom: 20,
   },
-  greeting: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#ffffff',
-  },
-  date: {
-    fontSize: 14,
-    color: '#a0a0a0',
-    marginTop: 4,
-  },
-  notificationButton: {
-    position: 'relative',
-  },
-  bellIcon: {
-    fontSize: 24,
-  },
-  notificationBadge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
-    backgroundColor: '#e94560',
-    borderRadius: 10,
-    width: 20,
-    height: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  badgeText: {
-    color: '#ffffff',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  statsContainer: {
+  progressHeader: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    marginBottom: 8,
+  },
+  progressTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: Colors.textPrimary,
+  },
+  progressPercent: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: Colors.accent,
+  },
+  progressBarBg: {
+    height: 10,
+    backgroundColor: Colors.surfaceSubtle,
+    borderRadius: 5,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: Colors.accent,
+    borderRadius: 5,
+  },
+  progressSub: {
+    fontSize: 13,
+    color: Colors.textMuted,
+    marginTop: 8,
+  },
+  greeting: { fontSize: 24, fontWeight: "bold", color: Colors.textPrimary },
+  date: { fontSize: 14, color: Colors.textMuted, marginTop: 4 },
+  statsRow: {
+    flexDirection: "row",
     paddingHorizontal: 20,
-    gap: 12,
-    marginBottom: 20,
+    gap: 10,
+    marginBottom: 16,
   },
   statCard: {
     flex: 1,
-    borderRadius: 16,
+    backgroundColor: Colors.surface,
+    borderRadius: 12,
+    padding: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  statValue: { fontSize: 22, fontWeight: "bold", color: Colors.primary },
+  statLabel: { fontSize: 12, color: Colors.textMuted, marginTop: 4 },
+  habitsList: { flex: 1, paddingHorizontal: 20 },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: Colors.textPrimary,
+    marginBottom: 4,
+  },
+  quoteCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 14,
     padding: 16,
-    alignItems: 'center',
+    marginBottom: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: Colors.secondary,
   },
-  todayCard: {
-    backgroundColor: '#2a2a4e',
-  },
-  bestCard: {
-    backgroundColor: '#3a2a1e',
-  },
-  missedCard: {
-    backgroundColor: '#3a2a3e',
-  },
-  statIcon: {
-    fontSize: 20,
+  quoteIcon: { fontSize: 20, marginBottom: 8 },
+  quoteText: {
+    fontSize: 14,
+    color: Colors.textPrimary,
+    fontStyle: "italic",
+    lineHeight: 22,
     marginBottom: 8,
   },
-  statLabel: {
+  quoteAuthor: {
     fontSize: 12,
-    color: '#a0a0a0',
-    marginBottom: 4,
-  },
-  statValue: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#ffffff',
-  },
-  alertBox: {
-    flexDirection: 'row',
-    backgroundColor: '#3a2a1e',
-    marginHorizontal: 20,
-    marginBottom: 20,
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#5a4a3e',
-  },
-  alertIcon: {
-    fontSize: 24,
-    marginRight: 12,
-  },
-  alertContent: {
-    flex: 1,
-  },
-  alertTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#f0a500',
-    marginBottom: 4,
-  },
-  alertSubtitle: {
-    fontSize: 13,
-    color: '#c0a080',
-  },
-  habitsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 16,
-  },
-  habitsTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#ffffff',
-  },
-  addNewButton: {
-    fontSize: 16,
-    color: '#6c63ff',
-    fontWeight: '600',
-  },
-  habitsList: {
-    paddingHorizontal: 20,
-    paddingBottom: 100,
+    color: Colors.secondary,
+    fontWeight: "600",
+    textAlign: "right",
   },
   habitCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#252541',
-    padding: 16,
-    borderRadius: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#3a3a52',
-  },
-  habitIconContainer: {
-    width: 50,
-    height: 50,
-    backgroundColor: '#1a1a2e',
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.surface,
     borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  habitIcon: {
-    fontSize: 24,
-  },
-  habitInfo: {
-    flex: 1,
-  },
-  habitName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
-    marginBottom: 4,
-  },
-  habitDifficulty: {
-    fontSize: 13,
-    color: '#a0a0a0',
-  },
-  habitRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
+  habitIcon: { fontSize: 28, marginRight: 12 },
+  habitInfo: { flex: 1 },
+  habitName: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary },
+  habitDifficulty: { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
+  habitRight: { alignItems: "center", gap: 8 },
   streakBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#3a2a1e',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    backgroundColor: Colors.surfaceSubtle,
     borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
   },
-  streakIcon: {
-    fontSize: 14,
-    marginRight: 4,
-  },
-  streakText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#ff9500',
-  },
-  checkCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  streakText: { fontSize: 12, color: Colors.accent },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
     borderWidth: 2,
-    borderColor: '#3a3a52',
-    justifyContent: 'center',
-    alignItems: 'center',
+    borderColor: Colors.border,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  checkCircleCompleted: {
-    backgroundColor: '#4CAF50',
-    borderColor: '#4CAF50',
-  },
-  checkMark: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  bottomNav: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    backgroundColor: '#16213e',
-    paddingVertical: 12,
-    paddingBottom: 20,
-    borderTopWidth: 1,
-    borderTopColor: '#2a2a4e',
-  },
-  navItem: {
+  checkboxCompleted: { backgroundColor: Colors.secondary, borderColor: Colors.secondary },
+  checkmark: { color: Colors.background, fontSize: 14, fontWeight: "bold" },
+  popupOverlay: {
     flex: 1,
+    backgroundColor: Colors.overlay,
+    justifyContent: "flex-end", 
+  },
+  popupBox: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 28,
+    alignItems: "center",
+    paddingBottom: 40,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  popupEmoji: { fontSize: 48, marginBottom: 8 },
+  popupTitle: {
+    fontSize: 22,
+    fontWeight: "bold",
+    color: Colors.textPrimary,
+    marginBottom: 6,
+  },
+  popupSubtitle: {
+    fontSize: 14,
+    color: Colors.textMuted,
+    marginBottom: 24,
+  },
+  reasonsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    justifyContent: "center",
+    width: "100%",
+    marginBottom: 20,
+  },
+  reasonBtn: {
+    width: "45%",
+    backgroundColor: Colors.surfaceSubtle,
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  reasonEmoji: { fontSize: 28, marginBottom: 6 },
+  reasonLabel: { fontSize: 14, color: Colors.textPrimary, fontWeight: "600" },
+  dismissBtn: { marginTop: 4, padding: 10 },
+  dismissText: { fontSize: 14, color: Colors.textMuted },
+  calOverlay: {
+    flex: 1,
+    backgroundColor: Colors.overlay,
+    justifyContent: 'flex-end',
+  },
+  calBox: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 30,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  calNavRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
   },
-  navIcon: {
-    fontSize: 22,
-    marginBottom: 4,
-    opacity: 0.5,
-  },
-  navIconActive: {
-    fontSize: 22,
-    marginBottom: 4,
-  },
-  navLabel: {
-    fontSize: 11,
-    color: '#a0a0a0',
-  },
-  navLabelActive: {
-    fontSize: 11,
-    color: '#6c63ff',
-    fontWeight: '600',
-  },
-  floatingButton: {
-    position: 'absolute',
-    bottom: 90,
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#6c63ff',
+  calNavBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: Colors.surfaceSubtle,
+    borderRadius: 10,
+  },
+  calNavArrow: { fontSize: 24, color: Colors.primary, fontWeight: 'bold' },
+  calMonthText: { fontSize: 20, fontWeight: 'bold', color: Colors.textPrimary },
+  calYearText: { fontSize: 13, color: Colors.textMuted, marginTop: 2 },
+  calGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  calCell: {
+    width: `${100 / 7}%`,
     alignItems: 'center',
-    shadowColor: '#6c63ff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 8,
+    paddingVertical: 4,
   },
-  floatingButtonText: {
-    fontSize: 32,
-    color: '#ffffff',
-    fontWeight: '300',
+  calDayCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
+  calDayToday: { backgroundColor: Colors.primary },
+  calDaySelected: { backgroundColor: Colors.surfaceSubtle },
+  calDayNum: { fontSize: 14, color: Colors.textPrimary, fontWeight: '500' },
+  calDayNumToday: { color: Colors.background, fontWeight: 'bold' },
+  calDayNumFuture: { color: Colors.border },
+  calDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: Colors.secondary,
+    marginTop: 2,
+  },
+  calCloseBtn: {
+    width: '100%',
+    backgroundColor: Colors.surfaceSubtle,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  calCloseBtnText: { color: Colors.textMuted, fontWeight: 'bold', fontSize: 14 },
 });
